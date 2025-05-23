@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+###############################################################################
+#  disk-burnin.sh  —  portable (macOS & Linux) disk stress & integrity tester
+#  Version 1.4   © 2025
+###############################################################################
+set -Eeuo pipefail                          # strict mode
+trap 'printf "\n\033[31mError:\033[0m %s (line %d)\n" "$BASH_COMMAND" "$LINENO"' ERR
+
+###############################################################################
+# ----------------------- user-tunable defaults ----------------------------- #
+PERCENT_FILL=90           # % of free space to consume
+REF_MB=1024               # reference size (MiB) – 1 GiB
+BLOCK_SIZE=64M            # dd block size
+COLUMNS=10                # files per directory row
+KEEP_DATA=0               # 1 → keep generated data
+WORKERS=                  # blank → cpu-cores-1
+FORCE_ROOT=0              # allow running on /
+VERSION=1.4
+###############################################################################
+
+die()  { printf "\033[31mError:\033[0m %s\n" "$*" >&2; exit 1; }
+info() { printf "[%s] %s\n" "$(date +%H:%M:%S)" "$*"; }
+
+###############################################################################
+# ------------------------- CLI parsing ------------------------------------- #
+while getopts ':p:s:b:y:j:kfvh' o; do case "$o" in
+  p) PERCENT_FILL=$OPTARG ;;  s) REF_MB=$OPTARG    ;;
+  b) BLOCK_SIZE=$OPTARG  ;;   y) COLUMNS=$OPTARG   ;;
+  j) WORKERS=$OPTARG     ;;   k) KEEP_DATA=1       ;;
+  f) FORCE_ROOT=1        ;;   v) echo "$VERSION"; exit 0 ;;
+  h) sed -n '2,70p' "$0"|sed 's/^# *//'; exit 0 ;;
+  *) die "invalid option -$OPTARG" ;;
+esac; done; shift $((OPTIND-1))
+target_dir="$(cd "${1:-.}" && pwd)"
+
+###############################################################################
+# ----------------------- platform detection -------------------------------- #
+if command -v getconf &>/dev/null; then
+  cores=$(getconf _NPROCESSORS_ONLN)
+else
+  cores=$(sysctl -n hw.ncpu 2>/dev/null || echo 1)
+fi
+: "${WORKERS:=$(( cores>1 ? cores-1 : 1 ))}"
+
+if   command -v sha256sum &>/dev/null; then hash_cmd="sha256sum"
+elif command -v shasum    &>/dev/null; then hash_cmd="shasum -a 256"
+else die "need sha256sum or shasum in \$PATH"; fi
+
+mount_point=$(df -P "$target_dir" | awk 'NR==2{print $6}')
+[[ $mount_point == / && $FORCE_ROOT -eq 0 ]] && \
+  die "Refusing to run on /.  Use -f to override."
+
+###############################################################################
+# ----------------------- SMART health (best-effort) ------------------------ #
+printf "\n=== SMART health check ===\n"
+dev=$(df "$target_dir"|awk 'NR==2{print $1}')
+if command -v smartctl &>/dev/null && [[ $dev == /dev/* ]]; then
+  smartctl -H "$dev" || printf "SMART check failed or needs sudo.\n"
+else printf "SMART status unavailable.\n"; fi; echo
+
+###############################################################################
+# ----------------------- plan the run -------------------------------------- #
+free_mb=$(df -Pm "$target_dir" | awk 'NR==2{print $4}')
+(( free_mb == 0 )) && die "No free space reported by df."
+rows=$(( free_mb * PERCENT_FILL / 100 / 1024 / COLUMNS ))
+total_files=$(( rows * COLUMNS ))
+(( total_files == 0 )) && die "Not enough space for even one 1 GiB file."
+
+info "Target dir  : $target_dir"
+info "OS / cores  : $(uname -s) / $cores (workers=$WORKERS)"
+info "Free (MiB)  : $free_mb"
+info "Plan        : $total_files × 1 GiB (~$((total_files)) GiB)"
+
+###############################################################################
+# ----------------------- create reference file ----------------------------- #
+cd "$target_dir" || die "cannot cd into $target_dir"
+
+info "Building 1 GiB reference …"
+dd if=/dev/urandom of=reference bs=1m count=$REF_MB status=none
+$hash_cmd reference | awk '{print $1}' > reference.sha256
+info "Reference ready."
+
+###############################################################################
+# ----------------------- generate work list -------------------------------- #
+tmpdir=$(mktemp -d)
+for ((r=1;r<=rows;r++));   do
+  for ((c=1;c<=COLUMNS;c++)); do printf "%d/%d\n" "$r" "$c"; done
+done > "$tmpdir/list"
+
+###############################################################################
+# ----------------------- worker helpers ------------------------------------ #
+write_one() {
+  local f=$1
+  mkdir -p "${f%/*}"
+  dd if=reference of="$f" bs=$BLOCK_SIZE status=none
+  $hash_cmd "$f" | awk '{print $1}' > "$f.sha256"
+  echo W
+}
+
+verify_one() {
+  local f=$1
+  if $hash_cmd -c "$f.sha256" &>/dev/null; then echo V
+  else echo F "$f"; fi
+}
+
+export BLOCK_SIZE hash_cmd
+export -f write_one verify_one
+
+###############################################################################
+# ----------------------- progress bar -------------------------------------- #
+progress() {                       # $1 = total files
+  local total=$1 done=0
+  local cols; cols=$(tput cols 2>/dev/null || echo 80)
+  (( cols < 40 )) && cols=40
+  local bar_w=$(( cols - 35 ))
+  while IFS= read -r token; do
+    case $token in
+      W|V) ((done++)) ;;
+      F*)  ((done++)); fail_list+=("${token#F }") ;;
+    esac
+    local percent=$(( done*100 / total ))
+    local filled=$(( bar_w * percent / 100 ))
+    printf "\r[%-*s] %3d%% %4d/%d" \
+           "$bar_w" "$(printf '%*s' "$filled" '' | tr ' ' '#')" \
+           "$percent" "$done" "$total"
+  done
+  printf '\n'
+}
+
+fail_list=()
+
+###############################################################################
+# ----------------------- run writes ---------------------------------------- #
+start_sec=$(date +%s)
+
+info "Writing with $WORKERS parallel jobs …"
+xargs -P "$WORKERS" -I{} bash -c 'write_one "$@"' _ {} < "$tmpdir/list" \
+  | progress "$total_files"
+
+###############################################################################
+# ----------------------- run verify ---------------------------------------- #
+info "Verifying files …"
+xargs -P "$WORKERS" -I{} bash -c 'verify_one "$@"' _ {} < "$tmpdir/list" \
+  | progress "$total_files"
+
+###############################################################################
+# ----------------------- summary ------------------------------------------- #
+elapsed=$(printf "%.2f" "$(($(date +%s) - start_sec))")
+avg_mibs=$(printf "%.2f" "$(bc -l <<< "$total_files*1024 / $elapsed")")
+verdict=$([[ ${#fail_list[@]} -eq 0 ]] && echo PASS || echo "FAIL (${#fail_list[@]} files)")
+
+cat <<EOF
+
+==== SUMMARY ====
+Verdict       : $verdict
+Data written  : ${total_files} GiB
+Elapsed time  : ${elapsed}s
+Avg throughput: ${avg_mibs} MiB/s
+EOF
+
+[[ ${#fail_list[@]} -gt 0 ]] && printf '%s\n' "${fail_list[@]}" > fail_list.txt
+
+###############################################################################
+# ----------------------- cleanup ------------------------------------------- #
+if (( KEEP_DATA == 0 )); then
+  rm -rf "$tmpdir" reference reference.sha256 */ *.sha256 */*
+fi
