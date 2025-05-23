@@ -22,7 +22,7 @@ Disk burn‑in tests are essential for verifying the health and reliability of n
 
 ```sh
 # Download and make executable
-curl -O curl -O https://raw.githubusercontent.com/TheBluWiz/diskHealthCheck/main/disk-burnin
+curl -O https://raw.githubusercontent.com/TheBluWiz/diskHealthCheck/main/disk-burnin
 chmod +x disk-burnin.sh
 
 # Basic usage (will prompt for a target directory)
@@ -137,6 +137,16 @@ Test files remain in `/mnt/mydisk` for manual inspection.
 * **Test data wasn’t deleted!**  
   If you used `-k` or the script exited abnormally, the test files remain. Remove them manually or rerun without `-k`.
 
+---
+  ## Going Forward
+  ### Potential Features
+  - Include File System testing using **fschk**
+  - Have the script autodetect file system type and run **fschk** to find and correct errors.
+    - Detect OS version
+    - Determine filesystem
+    - Run **fschk** that matches file system 
+  - Have this script added to **Homebrew**
+  - Create script that also functions for Windows
 ---
   ## Questions
   If you would like to contact me or view other projects I'm working on, you can explore my repositories at [TheBluWiz](https://github.com/TheBluWiz), or email me at thebluwiz@icloud.com.

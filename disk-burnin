@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 ###############################################################################
 #  disk-burnin.sh  —  portable (macOS & Linux) disk stress & integrity tester
-#  Version 1.4   © 2025
+#  Version 1.0   © 2025
 ###############################################################################
 set -Eeuo pipefail                          # strict mode
 trap 'printf "\n\033[31mError:\033[0m %s (line %d)\n" "$BASH_COMMAND" "$LINENO"' ERR
@@ -15,7 +15,7 @@ COLUMNS=10                # files per directory row
 KEEP_DATA=0               # 1 → keep generated data
 WORKERS=                  # blank → cpu-cores-1
 FORCE_ROOT=0              # allow running on /
-VERSION=1.4
+VERSION=1.0
 ###############################################################################
 
 die()  { printf "\033[31mError:\033[0m %s\n" "$*" >&2; exit 1; }
